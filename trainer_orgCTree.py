@@ -13,14 +13,16 @@ from tensorboardX import SummaryWriter
 from torch.nn.modules.loss import CrossEntropyLoss
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from utils import DiceLossDSV
+from utils import DiceLossDSV, orgCTree
 from torchvision import transforms
+import higra as hg
+import torch.nn.functional as F
 import pandas as pd
 import csv
 
 os.environ['CUDA_VISIBLE_DEVICES'] = "0,1,2,3"
 
-def pretrainer_bonescinti(args, model, snapshot_path):
+def trainer_bonescinti(args, model, snapshot_path):
     from TransBtrflyNet_dataset import TransBtrflyNet_dataset, RandomGenerator
     logging.basicConfig(filename=snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
@@ -45,34 +47,39 @@ def pretrainer_bonescinti(args, model, snapshot_path):
         model = nn.DataParallel(model)
     model.train()
     ce_loss = CrossEntropyLoss()
+
     dice_lossA = DiceLossDSV(numLabelA)
     dice_lossP = DiceLossDSV(numLabelP)
+    dice_lossA_CT = orgCTree(numLabelA)
+    dice_lossP_CT = orgCTree(numLabelP)
+
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     writer = SummaryWriter(snapshot_path + '/log')
     iter_num = 0
     max_epoch = args.max_epochs
-    max_iterations = args.max_epochs * len(trainloader)
+    max_iterations = args.max_epochs * len(trainloader)  # max_epoch = max_iterations // len(trainloader) + 1
     logging.info("{} iterations per epoch. {} max iterations ".format(len(trainloader), max_iterations))
     iterator = tqdm(range(max_epoch), ncols=70)
     la = []
     lca = []
     lda = []
+    lcta = []
     lp = []
     lcp = []
     ldp = []
+    lctp = []
     l = []
-    
 
     # Initialize CSV file and writer
     csv_filenameA = os.path.join(snapshot_path, 'log_A.csv')
     csv_fileA = open(csv_filenameA, mode='w', newline='')
     csv_writerA = csv.writer(csv_fileA)
-    csv_writerA.writerow(['iteration', 'loss', 'loss_CE', 'loss_dice'])
+    csv_writerA.writerow(['iteration', 'loss', 'loss_CE', 'loss_dice', 'loss_CT'])
 
     csv_filenameP = os.path.join(snapshot_path, 'log_P.csv')
     csv_fileP = open(csv_filenameP, mode='w', newline='')
     csv_writerP = csv.writer(csv_fileP)
-    csv_writerP.writerow(['iteration', 'loss', 'loss_CE', 'loss_dice'])
+    csv_writerP.writerow(['iteration', 'loss', 'loss_CE', 'loss_dice', 'loss_CT'])
 
     csv_filename= os.path.join(snapshot_path, 'log.csv')
     csv_file = open(csv_filename, mode='w', newline='')
@@ -95,36 +102,43 @@ def pretrainer_bonescinti(args, model, snapshot_path):
 
             loss_ceA = ce_loss(outputsA, label_batchA.long())
             loss_ceP = ce_loss(outputsP, label_batchP.long())
+
             loss_diceA = dice_lossA(outputsA, outputsAM, outputsAL, label_batchA, softmax=True)
             loss_diceP = dice_lossP(outputsP, outputsPM, outputsPL, label_batchP, softmax=True)
 
-            lossA = 0.5 * loss_ceA + 0.5 * loss_diceA
-            lossP = 0.5 * loss_ceP + 0.5 * loss_diceP
+            optimizer.zero_grad()
+            
+            loss_ct_A = dice_lossA_CT(outputsA, label_batchA, softmax=True)
+            loss_ct_P = dice_lossP_CT(outputsP, label_batchP, softmax=True)
+
+            lossA = 0.5 * loss_ceA + 0.5 * loss_diceA + 0.1 * loss_ct_A
+            lossP = 0.5 * loss_ceP + 0.5 * loss_diceP + 0.1 * loss_ct_P
             loss = 0.5 * (lossA + lossP)
 
-            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
             iter_num = iter_num + 1
-            logging.info('Iteration %d : loss : %f' % (iter_num, loss.item()))
+            logging.info('Iteration %d : loss : %f loss_dice : %f loss_CT : %f' % (iter_num, loss.item(), (loss_diceA.item() + loss_diceP.item())/2, (loss_ct_A.item() + loss_ct_P.item())/2))
             la.append(lossA.item())
             lca.append(loss_ceA.item())
             lda.append(loss_diceA.item())
+            lcta.append(loss_ct_A.item())
 
             lp.append(lossP.item())
             lcp.append(loss_ceP.item())
             ldp.append(loss_diceP.item())
+            lctp.append(loss_ct_P.item())
 
             l.append(loss.item())
 
             iteration = epoch_num * len(trainloader) + i_batch
-            csv_writerA.writerow([iteration, lossA.item(), loss_ceA.item(), loss_diceA.item()])
-            csv_writerP.writerow([iteration, lossP.item(), loss_ceP.item(), loss_diceP.item()])
+            csv_writerA.writerow([iteration, lossA.item(), loss_ceA.item(), loss_diceA.item(), loss_ct_A.item()])
+            csv_writerP.writerow([iteration, lossP.item(), loss_ceP.item(), loss_diceP.item(), loss_ct_P.item()])
             csv_writer.writerow([iteration, loss.item()])
+            
 
-
-        save_mode_path = os.path.join(snapshot_path, 'epoch_' + str(epoch_num) + '.pth')
+        save_mode_path = os.path.join(snapshot_path, 'epoch_' + str(epoch_num+88) + '.pth')
         torch.save(model.state_dict(), save_mode_path)
         logging.info("save model to {}".format(save_mode_path))
 
